@@ -67,6 +67,44 @@ The emulator's kernel patches already let unsigned binaries run (`bypass code
 signature checks`, `all binaries in trustcache`), so our program needs no real
 signature.
 
+## Second session: our code runs in the guest, the disk does not answer
+
+Proven on the rig, with a 96 MB HFS+ image built by `hdiutil` out of the stock
+ramdisk's own files plus ours:
+
+- **A dynamic arm64e binary of ours runs as the first process.** It printed to
+  `/dev/console` -- the console the emulator logs -- and reset the machine:
+  `*** INFERNO INIT: our first process is alive ***`. So the earlier static
+  failures really were about static linking, and nothing else stands in the way.
+- **It also runs as an ordinary launch daemon**, which is better: replacing
+  `launchd` means none of the stock daemons come up. A plist in
+  `/System/Library/LaunchDaemons` with `RunAtLoad` is enough, and
+  `StandardOutPath` of `/dev/console` puts its output in the guest log.
+- `/System/Library/Filesystems/apfs.fs/apfs_boot_util` takes a phase number
+  (`1` or `2`); both exit 0.
+- **The restored volume cannot be reached from a bare ramdisk boot.** `/dev` holds
+  only `md0`, `disk0`, `rdisk0`; no slices ever appear, `apfs_boot_util` changes
+  nothing, and **`/dev/disk0` cannot even be opened**. The NVMe namespace of the
+  system disk (nsid 1, nstype 1) is never made a block device: the guest's own
+  log shows `Creating blockdevice` for nsid 2, 3, 6, 7 and 8 only.
+
+That last point is what redirects the plan. The disk is live during a restore --
+ASR writes to it -- so the patch should happen **at the end of the restore**,
+inside the same ramdisk boot the app already performs, rather than in a separate
+one afterwards. Our daemon sits in that ramdisk, waits for the volumes to appear
+once `restored` has partitioned and written them, patches the cache, and lets the
+machine power off as it already does.
+
+If that turns out to be awkward, the fallback is to patch the filesystem image
+**in flight**, as it is streamed over ASR: no mounting at all, but the app would
+have to parse APFS read-only to find where the cache lives inside the image.
+
+Useful while testing: `lab16.sh` refuses to start without a listener on
+`/tmp/iusb.sock`; a python `AF_UNIX` socket that accepts and says nothing is
+enough. And use a data folder whose `root` actually holds a system --
+`stage/InfernoData/root` does (8.9 GB, GPT); `~/inferno-ios/ios14ab` does not
+(16 KB, blank), which cost a run to notice.
+
 ## What is left to build
 
 1. **Read HFS+** well enough to walk the stock ramdisk and pull files out.
