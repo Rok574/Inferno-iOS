@@ -104,7 +104,7 @@ D="$STAGE/InfernoData"
 "$QEMU" \
   -L "$LAB/L" -L /opt/homebrew/share/qemu -L "$SRC/build-macos/qemu-bundle/opt/homebrew/share/qemu" \
   -accel "$ACCEL_ARG" \
-  -M "t8030${DISP:+,$DISP}${USBCONN:+,usb-conn-type=unix,usb-conn-addr=$SOCK},trustcache=$D/Restore/Firmware/038-44135-124.dmg.trustcache,ticket=$D/root_ticket.der,sep-fw=$D/sep-firmware.n104.RELEASE.new.img4,sep-rom=$STAGE/AppleSEPROM-Cebu-B1,kaslr-off=true,boot-mode=exit_recovery" \
+  -M "t8030${DISP:+,$DISP}${USBCONN:+,usb-uplink-type=inferno,usb-uplink-addr=unix:$SOCK},trustcache=$D/Restore/Firmware/038-44135-124.dmg.trustcache,ticket=$D/root_ticket.der,sep-fw=$D/sep-firmware.n104.RELEASE.new.img4,sep-rom=$STAGE/AppleSEPROM-Cebu-B1,kaslr-off=true,boot-mode=exit_recovery" \
   -kernel "$D/Restore/kernelcache.release.iphone12b" \
   -dtb "$D/Restore/Firmware/all_flash/DeviceTree.n104ap.im4p" \
   -append "tlto_us=-1 mtxspin=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 serial=${SERIAL:-3} wdt=-1 launchd_unsecure_cache=1 -vm_compressor_wk_sw${AUDIO_BOOTARGS:-}" \

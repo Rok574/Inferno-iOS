@@ -167,28 +167,51 @@ final class EmbeddedDisplay: GuestDisplay {
                 tally.idle += 1
             }
             tally.handNanos += DispatchTime.now().uptimeNanoseconds - afterRead
+            closeSecond(&tally)
             report(&tally)
             Thread.sleep(forTimeInterval: 1.0 / 60)
         }
     }
 
-    /// What the last second of the loop looked like.
+    /// What the last quarter of a minute of the loop looked like.
     private struct Tally {
         var delivered = 0
         var idle = 0
         var readNanos: UInt64 = 0
         var handNanos: UInt64 = 0
         var since = DispatchTime.now().uptimeNanoseconds
+        /// Frames the machine showed, one entry for each second closed so far.
+        var presents: [Int] = []
+        var refreshes: UInt64 = 0
+        /// When the second still open began.
+        var secondSince = DispatchTime.now().uptimeNanoseconds
     }
 
-    /// Says once a second where the frames went.
+    /// Asks the machine, as each second closes, how many frames it showed in it.
+    ///
+    /// An average over a quarter of a minute cannot tell a swipe from a still
+    /// screen: two seconds at thirty frames among thirteen at none read as four.
+    /// Counted a second at a time, the swipe reads as thirty. The library's
+    /// counters restart on every read, so this is the one place that reads them.
+    private func closeSecond(_ tally: inout Tally) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - tally.secondSince >= 1_000_000_000 else { return }
+        var counters: [UInt64] = [0, 0]
+        if let statsFn { counters.withUnsafeMutableBufferPointer { statsFn($0.baseAddress) } }
+        tally.presents.append(Int(counters[0]))
+        tally.refreshes += counters[1]
+        tally.secondSince = now
+    }
+
+    /// Says once a quarter of a minute where the frames went.
     ///
     /// The frame counter under the screen only ever knew about the frames that
     /// arrived; it could not tell a guest drawing ten times a second from a
-    /// guest drawing forty and losing thirty on the way. These three numbers
-    /// can: what the machine showed, what reached the screen, and how often
-    /// QEMU's main loop — the thing that competes with the vCPUs for the big
-    /// lock — got round to asking for a redraw at all.
+    /// guest drawing forty and losing thirty on the way. These numbers can: what
+    /// the machine showed, what reached the screen, and how often QEMU's main
+    /// loop — the thing that competes with the vCPUs for the big lock — got
+    /// round to asking for a redraw at all. The seconds in which the guest drew
+    /// anything are summed up apart, since those are the ones someone watched.
     private func report(_ tally: inout Tally) {
         let now = DispatchTime.now().uptimeNanoseconds
         let elapsed = Double(now - tally.since) / 1_000_000_000
@@ -196,22 +219,30 @@ final class EmbeddedDisplay: GuestDisplay {
         // pushed everything else in the log off the screen, and the numbers it
         // carried were the same fifteen times over.
         guard elapsed >= 15 else { return }
-        defer { tally = Tally() }
-        guard Settings.shared.showFPS, let statsFn else { return }
+        defer {
+            // The open second carries over: its frames are still in the
+            // machine's counters, and a clock started afresh would fold them
+            // into the next second.
+            let open = tally.secondSince
+            tally = Tally()
+            tally.secondSince = open
+        }
+        guard Settings.shared.showFPS, statsFn != nil else { return }
 
-        var counters: [UInt64] = [0, 0]
-        counters.withUnsafeMutableBufferPointer { statsFn($0.baseAddress) }
-
-        // A second in which the machine showed nothing and nothing reached the
-        // screen says only that the guest was still. Printing that once a
-        // second buries everything else in the log, so it is left out.
-        guard counters[0] > 0 || tally.delivered > 0 else { return }
+        // A window in which the machine showed nothing and nothing reached the
+        // screen says only that the guest was still, so it is left out.
+        let shown = tally.presents.reduce(0, +)
+        guard shown > 0 || tally.delivered > 0 else { return }
+        let drawing = tally.presents.filter { $0 > 0 }.sorted()
         let milliseconds = { (nanos: UInt64) in Double(nanos) / 1_000_000 / elapsed }
 
         LogCapture.shared.note(L(
-            "Кадры: гость показал %.0f/с, дошло %.0f/с, вхолостую %.0f/с; главный цикл %.0f/с; чтение %.0f мс/с, выдача %.0f мс/с",
-            Double(counters[0]) / elapsed, Double(tally.delivered) / elapsed, Double(tally.idle) / elapsed,
-            Double(counters[1]) / elapsed, milliseconds(tally.readNanos), milliseconds(tally.handNanos)))
+            "Кадры: гость показал %.0f/с (в секунды, когда рисовал: медиана %d, лучшая %d, от 30 и выше — %d из %d); дошло %.0f/с, вхолостую %.0f/с; главный цикл %.0f/с; чтение %.0f мс/с, выдача %.0f мс/с",
+            Double(shown) / elapsed,
+            drawing.isEmpty ? 0 : drawing[drawing.count / 2], drawing.last ?? 0,
+            drawing.filter { $0 >= 30 }.count, drawing.count,
+            Double(tally.delivered) / elapsed, Double(tally.idle) / elapsed,
+            Double(tally.refreshes) / elapsed, milliseconds(tally.readNanos), milliseconds(tally.handNanos)))
     }
 
     private func resize(width: Int, height: Int) {

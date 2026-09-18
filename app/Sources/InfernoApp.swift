@@ -114,7 +114,12 @@ final class VMModel: ObservableObject {
     private(set) var guestAgent: GuestAgent?
     private var agentBringUpStarted = false
     private lazy var qmp = QMPClient(port: config.qmpPort)
-    var config: VMConfig { Settings.shared.config }
+    /// What the next start uses instead of the settings. A restore boots the
+    /// same machine with a ramdisk and without the network device, and that is
+    /// a property of the run rather than something to save.
+    var configOverride: VMConfig?
+
+    var config: VMConfig { configOverride ?? Settings.shared.config }
 
     /// Chosen when the machine starts and kept for its lifetime: the built-in
     /// path needs the emulator library to be loaded before it can exist at all.
@@ -144,7 +149,11 @@ final class VMModel: ObservableObject {
 
     func refreshFiles() {
         missing = VMConfig.missingFiles()
+        needsRestore = missing.isEmpty && !VMConfig.systemInstalled
     }
+
+    /// Everything is in place, but the disk has no system on it yet.
+    @Published var needsRestore = VMConfig.missingFiles().isEmpty && !VMConfig.systemInstalled
 
     /// StikDebug attaches after launch, so the answer changes over time.
     func refreshJIT() {
@@ -164,6 +173,13 @@ final class VMModel: ObservableObject {
         // log people send with that report has nothing in it at all.
         guard missing.isEmpty else {
             LogCapture.shared.note(L("Запуск отменён: не хватает файлов — %@", missing.joined(separator: ", ")))
+            return
+        }
+        // A blank disk boots into nothing and looks like a hang. A restore is
+        // started the other way round — it brings its own ramdisk — so only a
+        // plain start is refused here.
+        guard config.restoreRamdiskPath != nil || VMConfig.systemInstalled else {
+            LogCapture.shared.note(L("Запуск отменён: на диске ещё нет системы — сначала «Восстановление»"))
             return
         }
         // Which accelerator, said before anything else: under HVF there is no
@@ -195,6 +211,9 @@ final class VMModel: ObservableObject {
             guard let self else { return }
             self.qemuState = state
             if state != .running { HostHaptics.shared.stop() }
+            #if os(macOS)
+            VMModel.holdAwake(state == .running)
+            #endif
             if state == .running {
                 // Give qemu_init time to open its sockets.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -1292,7 +1311,8 @@ struct ControlMenu: View {
                 Button(startTitle, systemImage: "play.fill") {
                     model.start()
                 }
-                .disabled(model.isRunning || model.hasRun || !model.missing.isEmpty)
+                .disabled(model.isRunning || model.hasRun || !model.missing.isEmpty
+                          || model.needsRestore)
                 Button(L("Во весь экран"), systemImage: "arrow.up.left.and.arrow.down.right") {
                     fullScreen = true
                 }
@@ -1422,6 +1442,7 @@ struct ControlMenu: View {
     private var startTitle: String {
         if model.isRunning { return L("Запущена") }
         if model.hasRun { return L("Остановлена — перезапустите приложение") }
+        if model.needsRestore { return L("Системы нет — сначала «Восстановление»") }
         return L("Запустить")
     }
 
@@ -1841,11 +1862,50 @@ struct TerminalView: View {
 }
 
 /// Shown until the guest images are present in the app's Documents folder.
+///
+/// There are two ways out of it, and the first one is new: the app can make the
+/// whole kit itself out of a firmware archive, and then nothing has to be
+/// copied into its folder at all. The other is the folder assembled on a
+/// computer, which is how this worked before there was a restore.
 struct SetupView: View {
     @ObservedObject var model: VMModel
 
+    private enum Source: String { case scratch, folder }
+    @AppStorage("restoreSource") private var sourceRaw = Source.scratch.rawValue
+    private var source: Source { Source(rawValue: sourceRaw) ?? .scratch }
+
     var body: some View {
         List {
+            Section {
+                Picker(L("Откуда"), selection: $sourceRaw) {
+                    Text(L("С нуля")).tag(Source.scratch.rawValue)
+                    Text(L("Готовая папка")).tag(Source.folder.rawValue)
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(source == .scratch
+                     ? L("Приложение сделает всё само: диски, распаковку прошивки, оба тикета и прошивку SEP. В свою папку заранее класть нечего — файлы выбираются в «Файлах» и читаются там, где лежат.")
+                     : L("Берётся InfernoData, уже лежащая в папке приложения, — та, что собрана на компьютере."))
+            }
+
+            if source == .scratch {
+                RestoreKitSetup {
+                    // Refreshing right away can make `missing` empty before the
+                    // final "Готово" line is even read: this view disappears the
+                    // instant that happens, taking the message with it. A beat
+                    // is enough to actually see it before the screen moves on.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        model.refreshFiles()
+                    }
+                }
+            } else {
+                folderInstructions
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var folderInstructions: some View {
             Section {
                 #if os(macOS)
                 Text(L("Скопируйте InfernoData и AppleSEPROM-Cebu-B1 в папку Inferno в «Документах»."))
@@ -1872,7 +1932,6 @@ struct SetupView: View {
                     model.refreshFiles()
                 }
             }
-        }
     }
 }
 

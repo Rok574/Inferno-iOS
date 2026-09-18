@@ -295,6 +295,12 @@ are in Russian, the language the work was done in.
 
 - **[`TODO.md`](TODO.md)** — everything still open, with the reasoning behind each item and what was
   already ruled out. The best place to start.
+- **[`RESTORE.md`](RESTORE.md)** — building your own guest from an IPSW, and restoring it **without
+  the companion VM** the stock setup needs: `netlab/muxd.py` is the USB host, so `idevicerestore`
+  talks to the emulator directly. Every file, where it comes from, and the exact commands.
+- **[`RESTORE-FINDINGS.md`](RESTORE-FINDINGS.md)** — what that cost to work out: what is proven to
+  work, and exactly where a newer iOS stops (a `dyld` loop in the guest, found with a stack walk
+  over QMP).
 - **[`FINDINGS.md`](FINDINGS.md)** — how the SEP panic was actually diagnosed. Worth reading not for
   the answer but for the method: a controlled A/B on identical state, which is what finally
   separated a real cause from three plausible ones.

@@ -144,6 +144,14 @@ final class Settings: ObservableObject {
     @AppStorage("netAutoFix") var netAutoFix: Bool = true {
         willSet { objectWillChange.send() }
     }
+    @AppStorage("usbExport") var usbExport: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// Anything on the network can take the device, so not the loopback: the
+    /// point is a Mac elsewhere. The port is the emulator's own default.
+    @AppStorage("usbExportAddress") var usbExportAddress: String = "0.0.0.0:8030" {
+        willSet { objectWillChange.send() }
+    }
 
     @AppStorage("language") var language: String = AppLanguage.system.rawValue {
         willSet { objectWillChange.send() }
@@ -168,6 +176,7 @@ final class Settings: ObservableObject {
         c.tbSize = tbSize
         c.virtualization = virtualization && HVF.probe == .available
         c.network = network
+        c.usbExport = usbExport ? usbExportAddress : nil
         c.headless = headless
         c.builtInDisplay = builtInDisplay
         c.audio = guestAudio
@@ -282,6 +291,9 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink { RestoreSettings(model: model) } label: {
+                        Label(L("Восстановление"), systemImage: "arrow.clockwise.circle")
+                    }
                     NavigationLink { DiagnosticsSettings(model: model) } label: {
                         Label(L("Диагностика"), systemImage: "stethoscope")
                     }
@@ -327,7 +339,7 @@ struct MacSettingsView: View {
 
     enum Page: Hashable {
         case screen, terminal, network, battery, statusBar
-        case general, machine, translator, diagnostics, credits
+        case general, machine, translator, restore, diagnostics, credits
     }
 
     var body: some View {
@@ -344,6 +356,7 @@ struct MacSettingsView: View {
                     row(.general, L("Основные"), "gearshape")
                     row(.machine, L("Машина"), "cpu")
                     row(.translator, L("Транслятор"), "arrow.triangle.2.circlepath")
+                    row(.restore, L("Восстановление"), "arrow.clockwise.circle")
                     row(.diagnostics, L("Диагностика"), "stethoscope")
                 }
                 Section {
@@ -373,6 +386,7 @@ struct MacSettingsView: View {
         case .general:     GeneralSettings(model: model)
         case .machine:     MachineSettings()
         case .translator:  TranslatorSettings()
+        case .restore:     RestoreSettings(model: model)
         case .diagnostics: DiagnosticsSettings(model: model)
         case .credits:     CreditsView()
         }
@@ -488,16 +502,36 @@ private struct NetworkSettings: View {
         Form {
             Section {
                 Toggle(L("Интернет через USB"), isOn: $settings.network)
+                    .disabled(settings.usbExport)
             } footer: {
                 Text(L("Эмулятор сам работает USB-хостом: переводит устройство в режим CDC-NCM и выпускает трафик наружу через slirp. Отдельная виртуалка не нужна."))
             }
 
-            if settings.network {
+            if settings.network, !settings.usbExport {
                 Section {
                     Toggle(L("Поднимать интерфейс в госте"), isOn: $settings.netAutoFix)
                 } footer: {
                     Text(L("iOS не всегда включает свой конец связи: интерфейс появляется и тут же гасится. Если через минуту адрес так и не получен, приложение само выполнит в консоли гостя «ipconfig set en0 DHCP». Нужен бутстрап с шеллом на консоли."))
                 }
+            }
+
+            Section {
+                Toggle(L("Отдавать USB гостя наружу"), isOn: $settings.usbExport)
+                if settings.usbExport {
+                    LabeledContent(L("Адрес")) {
+                        TextField("0.0.0.0:8030", text: $settings.usbExportAddress)
+                            .font(.footnote.monospaced())
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .noAutocapitalization()
+                    }
+                }
+            } header: {
+                Text(L("Порт USB"))
+            } footer: {
+                Text(settings.usbExport
+                     ? L("Пока это включено, интернета в госте и восстановления не будет: порт у гостя один, и хост у него один. На маке нужен клиент VirtualHere — он найдёт машину сам (Bonjour, имя «Inferno») или примет адрес руками. Только TCP; гость должен догрузиться до подъёма своего USB.")
+                     : L("Порт гостя можно отдать другой машине по протоколу VirtualHere: мак с клиентом VirtualHere увидит настоящий айфон на своём USB — Finder, usbmuxd, idevice-инструменты. Взамен уходит всё, ради чего порт нужен здесь: интернет в госте и восстановление."))
             }
         }
         .navigationTitle(L("Сеть"))
@@ -775,6 +809,100 @@ private struct TranslatorSettings: View {
 /// This used to hang off the control menu, which made the menu long and put
 /// diagnostics one tap from everything else. They belong here: rarely wanted,
 /// and worth reading rather than glancing at.
+/// Restoring the guest from the phone itself.
+///
+/// The machine boots the IPSW's restore ramdisk, the app plays the USB host the
+/// stock setup needs a second computer for, and `restored` — the guest's own
+/// restore service — answers. From there the app hands over the firmware itself,
+/// which is what `idevicerestore` does on a desktop.
+private struct RestoreSettings: View {
+    @ObservedObject var model: VMModel
+    @ObservedObject private var session = RestoreSession.shared
+
+    /// Where the guest is going to come from.
+    ///
+    /// From scratch the app makes the whole kit itself and nothing has to be
+    /// put in its folder beforehand; the other way is the folder assembled on a
+    /// computer, which is how this worked before there was a restore.
+    private enum Source: String { case scratch, folder }
+    @AppStorage("restoreSource") private var sourceRaw = Source.scratch.rawValue
+    private var source: Source { Source(rawValue: sourceRaw) ?? .scratch }
+
+    @State private var picking = false
+    /// Held in state, not read fresh: a computed property changing behind the
+    /// view's back does not redraw it.
+    @State private var firmware: URL? = RestoreSession.firmware
+
+    private var status: String {
+        switch session.stage {
+        case .idle:              return L("Не начато")
+        case .booting:           return L("Машина загружается…")
+        case .waitingForDevice:  return L("Жду устройство на USB…")
+        case .ready(let type):   return L("Гость отвечает: %@", type)
+        case .restoring(let what, let done):
+            return L("%@ — %d %%", what, Int(done * 100))
+        case .done:              return L("Готово")
+        case .failed(let what):  return what
+        }
+    }
+
+    var body: some View {
+        SettingsRoot {
+            Section {
+                Picker(L("Откуда"), selection: $sourceRaw) {
+                    Text(L("С нуля")).tag(Source.scratch.rawValue)
+                    Text(L("Готовая папка")).tag(Source.folder.rawValue)
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(source == .scratch
+                     ? L("Приложение сделает всё само: диски, распаковку прошивки, оба тикета и прошивку SEP. В свою папку заранее класть нечего — файлы выбираются в «Файлах» и читаются там, где лежат.")
+                     : L("Берётся InfernoData, уже лежащая в папке приложения, — та, что собрана на компьютере."))
+            }
+
+            if source == .scratch {
+                RestoreKitSetup()
+            } else {
+                Section(L("Папка")) {
+                    Button { picking = true } label: {
+                        LabeledContent(L("Прошивка .ipsw"),
+                                       value: firmware?.lastPathComponent ?? L("выбрать"))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
+                    let missing = VMConfig.missingFiles()
+                    if missing.isEmpty {
+                        Text(L("Всё на месте")).foregroundStyle(.secondary)
+                    } else {
+                        Text(L("Не хватает: %@", missing.joined(separator: ", ")))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section {
+                LabeledContent(L("Ход"), value: status)
+                if let ramdisk = RestoreSession.ramdisk {
+                    LabeledContent(L("RAM-диск"), value: ramdisk.lastPathComponent)
+                }
+                Button(L("Начать рестор")) { session.start(model: model) }
+                    .disabled(session.stage.isBusy || model.isRunning || RestoreSession.ramdisk == nil)
+                Button(L("Остановить"), role: .destructive) { session.stop() }
+                    .disabled(!session.stage.isBusy)
+            } footer: {
+                Text(L("Машина загружается с RAM-диска из прошивки, а приложение работает USB-хостом — тем, ради которого в обычной схеме нужен второй компьютер. Пока набор не готов, рестор начать нельзя."))
+            }
+        }
+        .navigationTitle(L("Восстановление"))
+        .inlineNavigationTitle()
+        .fileImporter(isPresented: $picking, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            RestoreSession.remember(firmware: url)
+            firmware = url
+        }
+    }
+}
+
 private struct DiagnosticsSettings: View {
     @ObservedObject var model: VMModel
 

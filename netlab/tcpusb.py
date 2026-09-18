@@ -1,11 +1,13 @@
 """Host side of Inferno's USB-over-socket link.
 
-The emulated device exports its USB port through `hw/usb/hcd-tcp.c`, which
+The emulated device exports its USB port through `hw/usb/hcd-inferno.c`, which
 *connects* to a socket and expects whoever listens there to act as the USB
 host: send `TCP_USB_REQUEST`, read back `TCP_USB_RESPONSE`. That is the role the
 companion Linux VM plays in the stock setup, and the role this module replaces.
 
-The wire format is `hw/usb/tcp-usb.h`, packed little-endian structs.
+The wire format is `hw/usb/inferno-proto.h`, packed little-endian structs. The
+emulator renamed these messages from `TCP_USB_*` to `INFERNO_*` without changing
+a byte of them, so the names below are the old ones for the same wire.
 """
 
 import os

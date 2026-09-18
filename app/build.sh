@@ -98,6 +98,8 @@ cp "$DYLIB" "$APP/Frameworks/"
 # The library finds the framework through @loader_path, so beside it.
 if [ -n "$HVF" ]; then cp -R "$HYPERVISOR" "$APP/Frameworks/"; fi
 chmod +x "$APP/Inferno"
+# What a restore seeds the small SEP-state disks from — see RestorePrep.swift.
+cp -R "$ROOT/Resources/SEPTemplates" "$APP/SEPTemplates"
 
 # QEMU's data directory. Inferno drops the keymaps from its tree, but the VNC
 # server still refuses to start without them, so take them from a stock QEMU.

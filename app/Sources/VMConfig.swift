@@ -37,6 +37,19 @@ struct VMConfig {
     var displayWidth: Int = 828
     var displayHeight: Int = 1792
     var displayScale: Int = 2
+    /// Boot this ramdisk instead of the installed system: what a restore runs.
+    /// The machine then heads for recovery by itself, so it is not told to leave
+    /// it, and `GuestUSB` — not the network device — owns the USB socket.
+    var restoreRamdiskPath: String?
+    /// Serve the guest's USB port to another machine over VirtualHere, at this
+    /// `host:port`, instead of keeping it here.
+    ///
+    /// The guest has one USB port and it has one host. Normally that host is on
+    /// this side: the app for a restore, the emulator's own CDC-NCM device for
+    /// the guest's internet. Set this and the port is served out instead — a
+    /// Mac running a VirtualHere client sees a real iPhone on its own USB — and
+    /// nothing on this side can have it meanwhile.
+    var usbExport: String?
 
     /// The app's Documents on iOS, where the Files app shows it. A Mac app that
     /// is not sandboxed would be handed the user's whole Documents folder, so it
@@ -78,6 +91,23 @@ struct VMConfig {
     /// Everything the guest prints, from the first byte, kept on disk.
     static var guestConsoleLog: URL { documents.appendingPathComponent("guest-console.log") }
     static var sepROM: URL { documents.appendingPathComponent("AppleSEPROM-Cebu-B1") }
+    static var sepROMPresent: Bool { FileManager.default.fileExists(atPath: sepROM.path) }
+
+    /// Whether the device disk holds a system at all.
+    ///
+    /// A freshly made disk is 32 GB of zeros, and booting one does not fail —
+    /// the machine sits there looking for something to start, which from the
+    /// outside is indistinguishable from a hang. A restore is what fills it, so
+    /// the first bytes are worth a look before the machine is let go.
+    static var systemInstalled: Bool {
+        guard let image = rootImage else { return false }
+        // qcow2 carries its own header, so anything of that shape counts.
+        if image.format == "qcow2" { return true }
+        guard let handle = FileHandle(forReadingAtPath: image.path) else { return false }
+        defer { try? handle.close() }
+        let head = handle.readData(ofLength: 64 * 1024)
+        return head.contains { $0 != 0 }
+    }
 
     /// The device image, either as the raw file from the desktop kit or as a
     /// qcow2 conversion of it. qcow2 is preferred for transfers: the raw file is
@@ -94,6 +124,104 @@ struct VMConfig {
         return nil
     }
 
+    /// The ramdisk a restore boots from, if one was put beside the firmware.
+    ///
+    /// An IPSW carries two: the smaller one erases, the larger one upgrades. The
+    /// erase ramdisk is the one a fresh install needs, and the manifest names it
+    /// for the identity that erases.
+    static var restoreRamdisk: URL? {
+        guard let manifest = buildManifest(),
+              let name = manifest.path(of: "RestoreRamDisk")
+        else { return nil }
+        let url = dataDirectory.appendingPathComponent("Restore/" + name)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// What the machine loads, taken from the IPSW's own manifest where there is
+    /// one. Without it the names are the ones iOS 14.0 beta 5 uses, which is what
+    /// every existing installation has.
+    struct Firmware {
+        var kernel: String
+        var deviceTree: String
+        var trustcache: String
+    }
+
+    static var firmware: Firmware {
+        let fallback = Firmware(kernel: "Restore/kernelcache.release.iphone12b",
+                                deviceTree: "Restore/Firmware/all_flash/DeviceTree.n104ap.im4p",
+                                trustcache: "Restore/Firmware/038-44135-124.dmg.trustcache")
+        guard let manifest = buildManifest() else { return fallback }
+        let ramdisk = manifest.path(of: "RestoreRamDisk")
+        let trustcache = manifest.path(of: "RestoreTrustCache")
+            ?? ramdisk.map { "Firmware/\($0).trustcache" }
+        guard let kernel = manifest.path(of: "KernelCache"),
+              let tree = manifest.path(of: "DeviceTree"),
+              let trustcache
+        else { return fallback }
+        let resolved = Firmware(kernel: "Restore/" + kernel,
+                                deviceTree: "Restore/" + tree,
+                                trustcache: "Restore/" + trustcache)
+        // A manifest that names files nobody copied over is worse than no
+        // manifest: the machine would refuse to start on a working set.
+        let present = [resolved.kernel, resolved.deviceTree, resolved.trustcache].allSatisfy {
+            usable(dataDirectory.appendingPathComponent($0))
+        }
+        return present ? resolved : fallback
+    }
+
+    /// The erase identity for the iPhone 11, out of `BuildManifest.plist`.
+    private struct BuildIdentity {
+        let manifest: [String: Any]
+        func path(of component: String) -> String? {
+            guard let entry = manifest[component] as? [String: Any],
+                  let info = entry["Info"] as? [String: Any]
+            else { return nil }
+            return info["Path"] as? String
+        }
+    }
+
+    private static var cachedManifest: (stamp: Date, identity: BuildIdentity)?
+    private static let manifestLock = NSLock()
+
+    /// The erase identity, parsed once.
+    ///
+    /// The file is half a megabyte, and this is asked for from view bodies —
+    /// during a restore those redraw as fast as the image moves. Re-read only
+    /// when the file itself changes.
+    private static func buildManifest() -> BuildIdentity? {
+        let url = dataDirectory.appendingPathComponent("Restore/BuildManifest.plist")
+        let stamp = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? .distantPast
+        manifestLock.lock()
+        if let cached = cachedManifest, cached.stamp == stamp {
+            manifestLock.unlock()
+            return cached.identity
+        }
+        manifestLock.unlock()
+        guard let found = parseManifest(url) else { return nil }
+        manifestLock.lock()
+        cachedManifest = (stamp, found)
+        manifestLock.unlock()
+        return found
+    }
+
+    private static func parseManifest(_ url: URL) -> BuildIdentity? {
+        guard let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let root = plist as? [String: Any],
+              let identities = root["BuildIdentities"] as? [[String: Any]]
+        else { return nil }
+        for identity in identities {
+            guard let info = identity["Info"] as? [String: Any],
+                  (info["DeviceClass"] as? String)?.lowercased() == "n104ap",
+                  (info["Variant"] as? String)?.contains("Erase") == true,
+                  let manifest = identity["Manifest"] as? [String: Any]
+            else { continue }
+            return BuildIdentity(manifest: manifest)
+        }
+        return nil
+    }
+
     /// Everything the machine needs on disk, in the order a person should fix it.
     static let requiredFiles: [(label: String, relativePath: String)] = [
         (L("Прошивка NVMe"), "InfernoData/firmware"),
@@ -106,14 +234,19 @@ struct VMConfig {
         ("SEP ssc", "InfernoData/sep_ssc"),
         (L("Тикет"), "InfernoData/root_ticket.der"),
         (L("Прошивка SEP"), "InfernoData/sep-firmware.n104.RELEASE.new.img4"),
-        ("Kernelcache", "InfernoData/Restore/kernelcache.release.iphone12b"),
-        ("Device tree", "InfernoData/Restore/Firmware/all_flash/DeviceTree.n104ap.im4p"),
-        ("TrustCache", "InfernoData/Restore/Firmware/038-44135-124.dmg.trustcache"),
         ("SEP ROM", "AppleSEPROM-Cebu-B1"),
     ]
 
     static func missingFiles() -> [String] {
-        var missing = requiredFiles.compactMap { entry -> String? in
+        // The three the manifest names go last, since which files they are
+        // depends on the version that was installed.
+        let loaded = firmware
+        let all = requiredFiles + [
+            ("Kernelcache", "InfernoData/" + loaded.kernel),
+            ("Device tree", "InfernoData/" + loaded.deviceTree),
+            ("TrustCache", "InfernoData/" + loaded.trustcache),
+        ]
+        var missing = all.compactMap { entry -> String? in
             let url = documents.appendingPathComponent(entry.relativePath).resolvingSymlinksInPath()
             return usable(url) ? nil : entry.label
         }
@@ -141,6 +274,22 @@ struct VMConfig {
         return (size ?? 0) > 0
     }
 
+    /// The kernel's command line. A Mac can be handed another one for a single
+    /// run — `open Inferno.app --args -bootArgs "…"` — which is how a boot
+    /// argument is tried without a rebuild; a launch argument lives only in
+    /// that process's defaults and is never saved.
+    ///
+    /// No `mtxspin=-1`, which the desktop kit passes. XNU caps it at 62.5 ms
+    /// (`ml_init_lock_timeout`) against a default of 10 µs, and that is how
+    /// long a thread waiting on a held mutex spins on its core while the owner
+    /// runs elsewhere. Spinning is only ever a bet that waiting is shorter than
+    /// sleeping; under emulation owners hold their locks far longer, so the
+    /// bet loses and the guest's cores burn the time.
+    static var bootArguments: String {
+        UserDefaults.standard.string(forKey: "bootArgs")
+            ?? "tlto_us=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 serial=3 wdt=-1 launchd_unsecure_cache=1 -vm_compressor_wk_sw"
+    }
+
     func arguments() -> [String] {
         let data = VMConfig.dataDirectory.path
         let sep = VMConfig.sepROM.path
@@ -150,27 +299,47 @@ struct VMConfig {
         // so both ends resolve this to the same file.
         let usbSocket = VMConfig.usbSocketName
 
-        let machine = [
-            "t8030",
-            "usb-conn-type=unix",
-            "usb-conn-addr=\(usbSocket)",
-            "trustcache=\(data)/Restore/Firmware/038-44135-124.dmg.trustcache",
+        let loaded = VMConfig.firmware
+        // Who gets the guest's USB port. `inferno` is the protocol this app
+        // speaks: the port dials the socket below and whoever listens there is
+        // the host. `virtualhere` turns it around — the emulator listens, and a
+        // VirtualHere client on another machine takes the device.
+        var parts = ["t8030"]
+        if let usbExport {
+            parts += ["usb-uplink-type=virtualhere", "usb-uplink-addr=\(usbExport)"]
+        } else {
+            parts += ["usb-uplink-type=inferno", "usb-uplink-addr=unix:\(usbSocket)"]
+        }
+        parts += [
+            "trustcache=\(data)/\(loaded.trustcache)",
             "ticket=\(data)/root_ticket.der",
             "sep-fw=\(data)/sep-firmware.n104.RELEASE.new.img4",
             "sep-rom=\(sep)",
             "kaslr-off=true",
-            // The machine boots whatever NVRAM says, and NVRAM can say
-            // `auto-boot=false` — left there by a restore that did not finish.
-            // Then it heads for recovery, wants a ramdisk nobody passed, and
-            // the emulator quits with `RAM Disk required for recovery` before
-            // the guest exists. This app only ever runs an installed system, so
-            // it asks for the way out of recovery every time: on a machine that
-            // was fine this changes nothing.
-            "boot-mode=exit_recovery",
+        ]
+        // Which way out of recovery the machine takes, said every time rather
+        // than left to whatever NVRAM happens to hold.
+        //
+        // An ordinary run only ever starts an installed system, and NVRAM can
+        // say `auto-boot=false` — left there by a restore that did not finish.
+        // Then the machine heads for recovery, wants a ramdisk nobody passed,
+        // and the emulator quits with `RAM Disk required for recovery` before
+        // the guest exists.
+        //
+        // A restore is the mirror of that, and getting it wrong is worse,
+        // because nothing says so: on `auto-boot=true` the machine ignores the
+        // ramdisk, boots as usual, finds no system on a blank disk, sits on
+        // `Still waiting for root device` and panics a minute later in
+        // `IOAESAccelerator`. Restores used to work here only because an
+        // earlier unfinished one had left `auto-boot=false` behind; a kit made
+        // from scratch carries a NVRAM that says otherwise.
+        parts.append(restoreRamdiskPath == nil ? "boot-mode=exit_recovery" : "boot-mode=enter_recovery")
+        parts += [
             "disp-width=\(displayWidth)",
             "disp-height=\(displayHeight)",
             "disp-scale=\(displayScale)",
-        ].joined(separator: ",")
+        ]
+        let machine = parts.joined(separator: ",")
 
         // QEMU looks for its data files (VNC keymaps among them) next to the
         // binary; inside an app bundle it has to be told where they are, or it
@@ -196,9 +365,9 @@ struct VMConfig {
             "-L", dataDir,
             "-accel", accel,
             "-M", machine,
-            "-kernel", "\(data)/Restore/kernelcache.release.iphone12b",
-            "-dtb", "\(data)/Restore/Firmware/all_flash/DeviceTree.n104ap.im4p",
-            "-append", "tlto_us=-1 mtxspin=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 serial=3 wdt=-1 launchd_unsecure_cache=1 -vm_compressor_wk_sw",
+            "-kernel", "\(data)/\(loaded.kernel)",
+            "-dtb", "\(data)/\(loaded.deviceTree)",
+            "-append", VMConfig.bootArguments,
             "-smp", String(cores),
             "-m", memory,
             // The console is logged to a file rather than only streamed: a
@@ -214,6 +383,13 @@ struct VMConfig {
             "-drive", "file=\(data)/sep_nvram,if=pflash,format=raw",
             "-drive", "file=\(data)/sep_ssc,if=pflash,format=raw",
         ]
+
+        // A restore boots the ramdisk from the IPSW instead of the disk. The
+        // machine puts `-restore rd=md0` on the command line by itself once it
+        // sees one, so nothing else changes here.
+        if let ramdisk = restoreRamdiskPath {
+            argv += ["-initrd", ramdisk]
+        }
 
         if !audio {
             // Silence is asked for explicitly: with no audiodev named, the
@@ -270,7 +446,9 @@ struct VMConfig {
             argv += ["-device", "nvme-ns,drive=xfer,bus=nvme-bus.0,nsid=8,nstype=2,logical_block_size=4096,physical_block_size=4096"]
         }
 
-        if network {
+        // Not while the port is served to another machine: this device would be
+        // a second host for a port that has one.
+        if network, usbExport == nil {
             // The device listens on the same socket the machine's USB port
             // dials into, so it must be named identically.
             argv += ["-netdev", "user,id=net0"]

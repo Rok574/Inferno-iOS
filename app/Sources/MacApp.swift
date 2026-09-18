@@ -65,6 +65,25 @@ struct InfernoMacApp: App {
 extension VMModel {
     /// The Mac app's one model, shared by the window and the settings.
     static let mac = VMModel()
+
+    /// Keeps the Mac from napping the app while its machine runs.
+    ///
+    /// An app whose window is covered or on another space gets App Nap: its
+    /// timers are coalesced and its threads throttled, and the guest inside it
+    /// slows down with them — which also skews any frame count taken while the
+    /// window is out of sight.
+    private static var awake: NSObjectProtocol?
+
+    static func holdAwake(_ on: Bool) {
+        if on, awake == nil {
+            awake = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                reason: "The guest machine is running")
+        } else if !on, let activity = awake {
+            ProcessInfo.processInfo.endActivity(activity)
+            awake = nil
+        }
+    }
 }
 
 enum MacSettings {

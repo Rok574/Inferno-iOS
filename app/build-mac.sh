@@ -66,6 +66,8 @@ xcrun --sdk macosx swiftc \
 echo "==> Bundle"
 cp "$ROOT/Resources/Info-macOS.plist" "$APP/Contents/Info.plist"
 cp "$DYLIB" "$APP/Contents/Frameworks/"
+# What a restore seeds the small SEP-state disks from — see RestorePrep.swift.
+cp -R "$ROOT/Resources/SEPTemplates" "$APP/Contents/Resources/SEPTemplates"
 
 # Every non-system library the emulator reaches, copied beside it and relinked
 # to be found there. Homebrew's own paths are absolute and would tie the app to
@@ -136,11 +138,17 @@ else
 fi
 
 echo "==> Signing"
+# Ad-hoc unless told otherwise, which is what a release ships. To macOS's privacy
+# checks every ad-hoc rebuild is a new app, so each one asks again for the
+# Documents folder and hangs at launch until someone answers. INFERNO_MAC_SIGN
+# names a certificate to sign with instead, and the same certificate keeps the
+# answer from one build to the next.
+SIGN="${INFERNO_MAC_SIGN:--}"
 # Inside out: the libraries first, since the app's seal covers them.
 for lib in "$FRAMEWORKS"/*.dylib; do
-    codesign --force --sign - --timestamp=none "$lib"
+    codesign --force --sign "$SIGN" --timestamp=none "$lib"
 done
-codesign --force --sign - --timestamp=none \
+codesign --force --sign "$SIGN" --timestamp=none \
     --entitlements "$ROOT/Resources/entitlements-macos.plist" \
     "$APP"
 

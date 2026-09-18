@@ -115,6 +115,9 @@ __pycache__/
 HAPTICS-PROMPT.md
 INVESTIGATION-PROMPT.md
 README-iOS.md
+# The frame-rate handoff and its measuring tools: notes for the next agent, not history.
+FPS-HANDOFF.md
+fps-tools/
 
 # Патчи к эмулятору — их место в форке, здесь они были бы вторым источником
 # правды, который непременно разойдётся с первым.

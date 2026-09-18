@@ -68,9 +68,29 @@ enum Threads {
             \(threads)
               \(spent)
               \(verdict)
+              \(L("память приложения: %@", Threads.footprint()))
               guest-console.log: \(console)
             """)
         }
+    }
+
+    /// What the system counts against this app.
+    ///
+    /// The number that matters on a phone: a restore moves gigabytes through
+    /// the guest's disk, and when this climbs into the app's limit the system
+    /// kills the process outright — from outside it looks like the transfer
+    /// simply stopped.
+    private static func footprint() -> String {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size
+                                           / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return L("неизвестно") }
+        return String(format: "%.0f МБ", Double(info.phys_footprint) / 1_048_576)
     }
 
     private static func consoleSize() -> String {
