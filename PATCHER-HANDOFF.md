@@ -141,6 +141,42 @@ allocation alone. The same trick starts it: one of the five stock daemon plists
 is rewritten in place to point at the victim's path, padded to the same length.
 That removes the HFS+ writer from the work below entirely.
 
+## Fourth session: the chain works, and the in-guest patch is the weak link
+
+The whole path ran on the rig, under HVF for the restore and TCG for the boot:
+
+- **The restore has to be made the way the guide makes it.** The app's SEP
+  templates for `nvram`, `effaceable`, `sep_nvram` and `sep_ssc` -- added to get
+  past the `sars` panic -- leave the restored system unable to unlock its data
+  volume: no `Unlock notification`, no `got key for volume`, and the boot stops
+  before anything is drawn. Blank files, as the guide creates them, restore
+  cleanly (no `sars` at all here) and the volume unlocks.
+- **Both halves of the filesystem patches are needed.** The cache patch alone is
+  not enough: five services (`com.apple.voicemail.vmd`, the three CommCenter
+  ones and `com.apple.locationd`) have to be off. The guide adds `Disabled` in
+  launchd's binary service cache; writing launchd's override file on the data
+  volume (`/db/com.apple.xpc.launchd/disabled.plist`) does the same and is a
+  small text file rather than a binary plist edit.
+- **The guest boots fine; only the screen was dead.** Reached through
+  `netlab/muxd.py`, the restored system answers `ideviceinfo` with 14.0, runs
+  SpringBoard and backboardd. What fails is rendering: `mediaserverd` dies with
+  KERN_INVALID_ADDRESS at 0, and backboardd then loops on
+  `FigVirtualFramebufferRemote ... error 0xe00002d7`.
+- **Because the patch our daemon applied was wrong.** The disk can be mounted on
+  the Mac (`hdiutil attach -imagekey diskimage-class=CRawDiskImage -blocksize
+  4096`), so the caches can be compared byte for byte. At `0x328be43c` ours held
+  the original prologue where a working system holds `ret`; at `0x427dcfcc` ours
+  held `movz w0, #0` where a working system holds `ret` -- the pair the patcher
+  writes, landed one instruction out. Running the same patcher from the host
+  (needs `sudo`, after `diskutil enableownership` and `mount -urw`) put the same
+  bytes as the known-good system, and the guest then booted and drew.
+
+So the patcher is right for iOS 14 -- its warnings about `_wrapGLIsAccelerated`,
+`_isWidget` and PosterBoard are newer-iOS symbols and harmless -- and what needs
+finding is why the same binary, run inside the ramdisk, wrote a different result.
+First suspects: the file being written through a mount that reported rw but
+behaved otherwise, and the daemon unmounting the moment the patcher exits.
+
 ## What is left to build
 
 1. **Read HFS+** well enough to walk the stock ramdisk and pull files out.
