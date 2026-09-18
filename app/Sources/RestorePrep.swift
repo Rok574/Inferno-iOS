@@ -44,15 +44,16 @@ enum RestorePrep {
 
     /// The disks the machine wants, and how big each one is.
     ///
-    /// `root` is 32 GB of holes and costs nothing until a restore fills it.
-    /// Most of the rest really do start blank — a real device's own copies of
-    /// `syscfg` and `ctrl_bits` are all zeros too, checked byte for byte. Four
-    /// are not: `effaceable`, `nvram`, `sep_nvram` and `sep_ssc` carry a little
-    /// structure even factory-blank, and a SEP that finds pure zeros there
-    /// instead panics (`sars`) partway into a restore — the same shape of bug
-    /// `FINDINGS.md` diagnosed as a generation mismatch, except the mismatch
-    /// here is zero versus what SEP actually expects to find. `SEPTemplates`
-    /// (bundled, from a known-clean device's copies) stands in for those four.
+    /// `root` is 32 GB of holes and costs nothing until a restore fills it, and
+    /// every one of them starts blank, as ChefKiss's guide makes them.
+    ///
+    /// Four of them — `effaceable`, `nvram`, `sep_nvram` and `sep_ssc` — were
+    /// once filled from a real device's copies instead, to get past a SEP panic
+    /// (`sars`) partway into a restore. That cure was worse: a restore made with
+    /// them finishes, but the system it leaves cannot unlock its own data
+    /// volume — no `Unlock notification` in the log, no key for the volume — and
+    /// never reaches a screen. Blank, the restore goes through without the panic
+    /// at all, and the system comes up.
     static let disks: [(name: String, size: Int)] = [
         ("root", 32 << 30),
         ("firmware", 8 << 20),
@@ -65,9 +66,6 @@ enum RestorePrep {
         ("sep_ssc", 128 << 10),
     ]
 
-    /// Disks that do not start as plain zeros — see `disks` above.
-    private static let templated: Set<String> = ["effaceable", "nvram", "sep_nvram", "sep_ssc"]
-
     /// Makes the whole kit. Blocks; call it off the main thread.
     static func prepare(_ inputs: Inputs,
                         note: @escaping (String) -> Void,
@@ -77,12 +75,7 @@ enum RestorePrep {
 
         // 1. The disks.
         for disk in disks where !FileManager.default.fileExists(atPath: data.appendingPathComponent(disk.name).path) {
-            let destination = data.appendingPathComponent(disk.name)
-            if templated.contains(disk.name), let template = bundledTemplate(disk.name) {
-                try FileManager.default.copyItem(at: template, to: destination)
-            } else {
-                try makeBlank(destination, size: disk.size)
-            }
+            try makeBlank(data.appendingPathComponent(disk.name), size: disk.size)
             note(L("Подготовка: создан %@", disk.name))
         }
 
@@ -145,16 +138,6 @@ enum RestorePrep {
         RestoreSession.remember(firmware: localIPSW)
 
         note(L("Готово. Дальше: настройки → «Восстановление» → «Начать рестор»"))
-    }
-
-    /// Where `build.sh`/`build-mac.sh` put `Resources/SEPTemplates` in the
-    /// bundle — same lookup `VMConfig` uses for `qemu-data`, since the two
-    /// platforms disagree on whether resources sit beside the executable or
-    /// under `Contents/Resources`.
-    private static func bundledTemplate(_ name: String) -> URL? {
-        let dir = (Bundle.main.resourcePath ?? Bundle.main.bundlePath) + "/SEPTemplates"
-        let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     /// Brings the archive onto the phone if it is not there already, with
