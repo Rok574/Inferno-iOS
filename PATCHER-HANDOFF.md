@@ -105,6 +105,42 @@ enough. And use a data folder whose `root` actually holds a system --
 `stage/InfernoData/root` does (8.9 GB, GPT); `~/inferno-ios/ios14ab` does not
 (16 KB, blank), which cost a run to notice.
 
+## Third session: the disk is there during a restore, and the image needs no writer
+
+Run under HVF, which turns a test from hours into minutes:
+
+    python3 netlab/muxd.py &
+    DATA=~/Downloads/InfernoKit ACCEL=hvf GUI=none MEM=4G \
+      GLOG=/tmp/x.log INITRD_FILE=<our.dmg> netlab/lab16.sh restore
+    USBMUXD_SOCKET_ADDRESS=UNIX:/tmp/inferno-usbmuxd \
+      ~/inferno-ios/tools/idevicerestore/src/idevicerestore --erase --restore-mode \
+      -i 0x1122334455667788 -T <root_ticket.der> <ipsw>
+
+The guest comes up in about fifteen seconds. iOS 14 is the version to test on:
+16 restores but wedges right after Setup appears.
+
+**The volumes appear while the restore runs, and our daemon can mount them.**
+Sixty seconds in, `disk1` shows up; two seconds later the container and its
+volumes -- `disk0s1`, `disk0s1s1`, `disk0s1s3`, `disk0s1s4`, then `disk0s1s5`.
+Our daemon mounted s3, s4 and s5 on its own. So patching at the end of the
+restore works in principle, and no separate boot is needed.
+
+**The patcher builds for the guest.** `InfernoFSPatcher` cross-compiles for iOS
+arm64e -- 144 KB -- with CMake (`-DCMAKE_SYSTEM_NAME=iOS`, sysroot `iphoneos`,
+`-DCMAKE_OSX_ARCHITECTURES=arm64e`). The SDK's libc++ refuses a deployment
+target of 14 with a warning promoted to an error; `-Wno-#warnings` is enough, and
+the ramdisk carries `libc++.1.dylib` and `libc++abi.dylib` for it to link
+against. It takes the cache path and has `--revert`, `--dry-run` and
+`--unredact-logs`.
+
+**The app will not need to write HFS+.** The ramdisk holds programs no restore
+uses -- `/usr/bin/usbcfwflasher` is 960 KB, `/usr/bin/peppytool` 53 KB -- and our
+binaries fit inside them. Overwriting a file's existing bytes needs only a
+*reader*: find where the file lives, write there, leave the catalogue and the
+allocation alone. The same trick starts it: one of the five stock daemon plists
+is rewritten in place to point at the victim's path, padded to the same length.
+That removes the HFS+ writer from the work below entirely.
+
 ## What is left to build
 
 1. **Read HFS+** well enough to walk the stock ramdisk and pull files out.
