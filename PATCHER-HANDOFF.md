@@ -162,20 +162,30 @@ The whole path ran on the rig, under HVF for the restore and TCG for the boot:
   SpringBoard and backboardd. What fails is rendering: `mediaserverd` dies with
   KERN_INVALID_ADDRESS at 0, and backboardd then loops on
   `FigVirtualFramebufferRemote ... error 0xe00002d7`.
-- **Because the patch our daemon applied was wrong.** The disk can be mounted on
-  the Mac (`hdiutil attach -imagekey diskimage-class=CRawDiskImage -blocksize
-  4096`), so the caches can be compared byte for byte. At `0x328be43c` ours held
-  the original prologue where a working system holds `ret`; at `0x427dcfcc` ours
-  held `movz w0, #0` where a working system holds `ret` -- the pair the patcher
-  writes, landed one instruction out. Running the same patcher from the host
-  (needs `sudo`, after `diskutil enableownership` and `mount -urw`) put the same
-  bytes as the known-good system, and the guest then booted and drew.
+- **Because the patch our daemon applied was never applied at all.** The binary
+  we put in the ramdisk was unsigned, and AMFI kills an unsigned process the
+  moment it execs -- silently, with no line on the console. The daemon reported
+  success because `WEXITSTATUS` of a signalled child is 0, which reads exactly
+  like a clean exit. What looked like a pair written one instruction out was a
+  pristine cache compared against a working one: where the patcher wants `ret`,
+  the untouched code already holds `movz w0, #0` from the instruction next to
+  it.
 
-So the patcher is right for iOS 14 -- its warnings about `_wrapGLIsAccelerated`,
-`_isWidget` and PosterBoard are newer-iOS symbols and harmless -- and what needs
-finding is why the same binary, run inside the ramdisk, wrote a different result.
-First suspects: the file being written through a mount that reported rw but
-behaved otherwise, and the daemon unmounting the moment the patcher exits.
+  Three things say plainly whether the patcher ran, and all three said no:
+  its own output (it always prints `Building patches...`), the revert file
+  `dyld_shared_cache_arm64e.InfernoOriginalBytes` it writes beside the cache
+  before touching a byte, and the bytes themselves.
+
+- **Signed, it works.** `codesign -f -s -` on the patcher inside the image, and
+  the in-guest run writes bytes identical to the host run at every offset
+  (`0x328be438: 00 00 80 d2`, `0x328be43c: c0 03 5f d6`, `0x8158bdc`,
+  `0x15e94f18`, `0x427dcfcc`, `0x1e8f708`, `0x59e6ac6c`). The restored system
+  then boots, draws the logo and the first-boot bar, and the log holds no
+  `FigVirtualFramebufferRemote` and no `KERN_INVALID_ADDRESS`.
+
+  The daemon now returns `-SIGNAL` for a signalled child, so a kill can never
+  again be read as success, and it keeps the patcher's output on the volume
+  (`/inferno_patch.log`) rather than on the console, which drops it.
 
 ## What is left to build
 
