@@ -164,6 +164,23 @@ their own patcher from
 [git.chefkiss.dev/AppleHax/InfernoFSPatcher](https://git.chefkiss.dev/AppleHax/InfernoFSPatcher).
 On a Mac the disk is attached with `hdiutil`, as their page describes.
 
+**The app does this itself, in the guest.** It puts the patcher and a small daemon
+of its own into a copy of the restore ramdisk, and launchd there starts the daemon
+at boot. The daemon sits still until the data volume appears -- the last thing a
+restore creates -- then mounts the system volume, runs the patcher over the shared
+cache and writes launchd's override file for the five services. The machine is
+still up for it because the emulator is told to hold the reset the guest asks for
+at the end (`hold-reset` on the SMC); the app stops the machine once the daemon
+says it is done.
+
+Nothing is added to the ramdisk: three files it already carries are overwritten in
+place (two NFC firmware blobs and the disabled `com.apple.syslogd.plist`), which is
+why no HFS+ writer is needed -- see `app/Sources/RestoreRamdisk.swift`.
+
+Both programs are ad-hoc signed at build time. That is not cosmetic: AMFI in the
+guest kills an unsigned process the moment it execs, silently, and the parent sees
+the exit status of a clean run.
+
 ## 8. The jailbreak bootstrap
 
 A bare guest has no shell, and half of what this app does talks to one. ChefKiss's

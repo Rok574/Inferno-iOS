@@ -389,6 +389,11 @@ struct VMConfig {
         // sees one, so nothing else changes here.
         if let ramdisk = restoreRamdiskPath {
             argv += ["-initrd", ramdisk]
+            // A restore ends with the guest asking to be reset, and the machine
+            // would go down with it -- taking the ramdisk, and our patcher
+            // still working inside it, along. Holding the reset keeps the
+            // machine up until the app stops it itself.
+            argv += ["-global", "driver=apple-smc,property=hold-reset,value=on"]
         }
 
         if !audio {

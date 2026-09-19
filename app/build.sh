@@ -98,8 +98,41 @@ cp "$DYLIB" "$APP/Frameworks/"
 # The library finds the framework through @loader_path, so beside it.
 if [ -n "$HVF" ]; then cp -R "$HYPERVISOR" "$APP/Frameworks/"; fi
 chmod +x "$APP/Inferno"
-# What a restore seeds the small SEP-state disks from — see RestorePrep.swift.
-cp -R "$ROOT/Resources/SEPTemplates" "$APP/SEPTemplates"
+
+# The two programs that run inside the guest, in the restore ramdisk: our
+# daemon and ChefKiss's filesystem patcher, which it starts once the restore
+# has finished writing. RestoreRamdisk.swift puts them into a copy of the
+# ramdisk; nothing here runs on the phone itself.
+#
+# Both are ad-hoc signed, and that is not cosmetic: AMFI in the guest kills an
+# unsigned process the moment it execs, silently, and a parent sees the same
+# exit status a clean run would give.
+#
+# The patcher is ChefKiss's, AGPL-3.0, built from their tree unmodified --
+# beside the repository as the README has it, or wherever
+# INFERNO_FS_PATCHER_SRC points.
+PATCHER_SRC="${INFERNO_FS_PATCHER_SRC:-}"
+if [ -z "$PATCHER_SRC" ]; then
+    for candidate in \
+        "$ROOT/../tools/InfernoFSPatcher" \
+        "$HOME/inferno-ios/tools/InfernoFSPatcher"
+    do
+        [ -d "$candidate/src" ] && PATCHER_SRC="$candidate" && break
+    done
+fi
+[ -n "$PATCHER_SRC" ] && [ -f "$PATCHER_SRC/src/main.cpp" ] || {
+    echo "Нет исходников InfernoFSPatcher. Склонируйте их или укажите INFERNO_FS_PATCHER_SRC=" >&2
+    exit 1
+}
+mkdir -p "$APP/guest"
+# arm64e and iOS 14: the guest is an emulated iPhone 11 running the firmware
+# being restored, not the phone this app is installed on.
+xcrun --sdk iphoneos clang -arch arm64e -isysroot "$SDK" -mios-version-min=14.0 -O2 \
+    -o "$APP/guest/inferno_patcher" "$ROOT/guest/patcher-daemon.c"
+xcrun --sdk iphoneos clang++ -arch arm64e -isysroot "$SDK" -mios-version-min=14.0 -O2 \
+    -std=c++17 -o "$APP/guest/inferno_fs_patcher" "$PATCHER_SRC/src/main.cpp"
+codesign -f -s - "$APP/guest/inferno_patcher"
+codesign -f -s - "$APP/guest/inferno_fs_patcher"
 
 # QEMU's data directory. Inferno drops the keymaps from its tree, but the VNC
 # server still refuses to start without them, so take them from a stock QEMU.

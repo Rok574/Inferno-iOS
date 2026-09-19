@@ -47,6 +47,34 @@ final class RestoreSession: ObservableObject {
     /// machine needs have to be in place, and nothing else may be running.
     static var ramdisk: URL? { VMConfig.restoreRamdisk }
 
+    /// The ramdisk the machine actually boots: the stock one with the patcher
+    /// and its daemon inside it, so the filesystem patches happen in the same
+    /// boot the restore does — the last step that used to need a computer.
+    ///
+    /// Made once and kept beside the kit; made again whenever the app is newer
+    /// than the image, which is how a new patcher reaches an old kit.
+    static func bootRamdisk(_ stock: URL) -> URL {
+        let ours = VMConfig.dataDirectory.appendingPathComponent("Restore-inferno.dmg")
+        let stamp = { (url: URL) in
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                ?? Date.distantPast
+        }
+        if FileManager.default.fileExists(atPath: ours.path),
+           let daemon = RestoreRamdisk.programs?.daemon, stamp(ours) > stamp(daemon) {
+            return ours
+        }
+        do {
+            try RestoreRamdisk.build(stock: stock, into: ours) { LogCapture.shared.note($0) }
+            return ours
+        } catch {
+            // Worth saying out loud rather than failing the restore: the stock
+            // ramdisk restores perfectly well, and what is lost is the patches
+            // afterwards, which a person can still apply from a computer.
+            LogCapture.shared.note(L("Рестор: патчер в RAM-диск не попал — %@", error.localizedDescription))
+            return stock
+        }
+    }
+
     private func set(_ stage: Stage) {
         DispatchQueue.main.async {
             self.stage = stage
@@ -114,7 +142,9 @@ final class RestoreSession: ObservableObject {
         }
 
         var config = Settings.shared.config
-        config.restoreRamdiskPath = ramdisk.path
+        // Not the stock ramdisk: the one carrying the patcher, made here if
+        // it is not made yet.
+        config.restoreRamdiskPath = RestoreSession.bootRamdisk(ramdisk).path
         // Memory and the translation buffer are left as the person set them.
         // A gigabyte is not enough, by the way — tried on the rig, and the
         // guest's watchdog resets the machine before ASR even starts.
@@ -193,7 +223,52 @@ final class RestoreSession: ObservableObject {
                 RestoreSession.noteMemory(what, done)
             })
         try client.run(on: channel, protocolVersion: protocolVersion)
+
+        // The restore is written, and the machine is still up because the
+        // emulator is holding the reset the guest asked for. That is the
+        // window our daemon patches in.
+        waitForPatcher()
+        DispatchQueue.main.async { self.model?.shutdown() }
         set(.done)
+    }
+
+    /// Waits for the patcher in the guest, reading the console the machine
+    /// writes anyway.
+    ///
+    /// Nothing else can be asked: the guest has no USB left by then — the
+    /// restore ends with `restored` going away — and touching NVRAM or the
+    /// volumes while the restore finishes is what broke two runs on the rig.
+    /// The daemon says what it is doing on the console, and that is enough.
+    ///
+    /// An hour is generous on purpose. The patcher walks a two-gigabyte shared
+    /// cache, and the phone runs the machine by translating every instruction.
+    private func waitForPatcher() {
+        set(.restoring(L("Патчи файловой системы"), 0.99))
+        guard let handle = try? FileHandle(forReadingFrom: VMConfig.guestConsoleLog) else { return }
+        defer { try? handle.close() }
+
+        // From here on only. The console is one file across runs, and a "done"
+        // left in it by the restore before this one would end the wait before
+        // this patcher had started.
+        _ = try? handle.seekToEnd()
+
+        var text = ""
+        var seen = Set<String>()
+        let deadline = Date().addingTimeInterval(3600)
+        while Date() < deadline {
+            if let chunk = try? handle.readToEnd(), !chunk.isEmpty {
+                text += String(decoding: chunk, as: UTF8.self)
+            }
+            for line in text.split(separator: "\n") where line.contains("*** PATCHER:") {
+                let said = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                if seen.insert(said).inserted {
+                    LogCapture.shared.note(said.replacingOccurrences(of: "*** PATCHER: ", with: "Патчи: "))
+                }
+            }
+            if text.contains("PATCHER: done") || text.contains("PATCHER: no shared cache") { return }
+            Thread.sleep(forTimeInterval: 2)
+        }
+        LogCapture.shared.note(L("Патчи: не дождались — машина останавливается как есть"))
     }
 
     /// The firmware archive to restore from.
