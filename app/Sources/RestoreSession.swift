@@ -343,13 +343,32 @@ final class RestoreSession: ObservableObject {
     /// Gives back the blocks of whatever was written before, keeping the file
     /// at its full size. A restore erases the disk in any case.
     private static func emptyTheDisk() {
-        guard let image = VMConfig.rootImage, image.format == "raw",
-              let handle = FileHandle(forWritingAtPath: image.path)
+        if let image = VMConfig.rootImage, image.format == "raw" {
+            blank(URL(fileURLWithPath: image.path))
+        }
+        // The four small state disks go back to blank as well, because a
+        // restore erases the device and the guide makes them blank for one.
+        //
+        // This is not tidiness. Builds before this one seeded them from a real
+        // device, and a kit made by one of those keeps those copies — nothing
+        // ever overwrites a file that is already there. A restore onto them
+        // finishes and then cannot unlock its own data volume: no key, no
+        // screen, and nothing in the log to say why.
+        for name in ["nvram", "effaceable", "sep_nvram", "sep_ssc"] {
+            blank(VMConfig.dataDirectory.appendingPathComponent(name),
+                  size: RestorePrep.disks.first { $0.name == name }?.size)
+        }
+    }
+
+    /// Hands a disk's blocks back, keeping the file the size it was.
+    private static func blank(_ url: URL, size: Int? = nil) {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let handle = try? FileHandle(forWritingTo: url)
         else { return }
         defer { try? handle.close() }
-        let size = (try? FileManager.default.attributesOfItem(atPath: image.path)[.size]) as? Int
+        let was = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
         try? handle.truncate(atOffset: 0)
-        try? handle.truncate(atOffset: UInt64(size ?? 32 << 30))
+        try? handle.truncate(atOffset: UInt64(size ?? was ?? 32 << 30))
     }
 
     private static let firmwareLock = NSLock()
