@@ -93,6 +93,10 @@ final class VMModel: ObservableObject {
     /// What the file transfer is doing, for the banner at the bottom.
     @Published var transfer: TransferState?
     @Published var missing: [String] = VMConfig.missingFiles()
+    /// Set by five taps on the title of the setup screen: shows the main
+    /// screen with files still missing. Only for this launch -- starting the
+    /// machine is still refused until the files are there.
+    @Published var setupSkipped = false
     @Published var jit: JIT.Availability = JIT.status
     /// QEMU is not re-entrant, and it lives inside this process. Once a machine
     /// has been started, a second one in the same process would take the app
@@ -1160,10 +1164,18 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !model.missing.isEmpty {
+                if !model.missing.isEmpty && !model.setupSkipped {
                     SetupView(model: model)
                         .navigationTitle("Inferno")
                         .inlineNavigationTitle()
+                        .toolbar {
+                            ToolbarItem(placement: .principal) {
+                                Text("Inferno")
+                                    .font(.headline)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture(count: 5) { model.setupSkipped = true }
+                            }
+                        }
                 } else {
                     // No navigation bar: the guest's picture is nearly as tall
                     // as the phone's own screen, and a title bar was taking the
