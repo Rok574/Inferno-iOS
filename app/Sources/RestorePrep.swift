@@ -24,6 +24,10 @@ enum RestorePrep {
         var sepROM: URL?
         /// The SEP firmware key for this exact build: 96 hex digits, IV first.
         var sepKey: String
+        /// Any real device's own Cryptex1 IM4M -- only iOS 16+ ever asks for
+        /// one, see `Cryptex1`. Left out entirely, an iOS 14 restore never
+        /// notices.
+        var cryptexTemplate: URL?
     }
 
     enum Failure: LocalizedError {
@@ -131,6 +135,17 @@ enum RestorePrep {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: rom, to: destination)
             note(L("Подготовка: SEP ROM на месте"))
+        }
+
+        // 7. The Cryptex1 template -- iOS 16+ only, and any real device's own
+        // ticket will do; RestoreClient reads its own copy back out of
+        // InfernoData, same as everything else here.
+        if let template = inputs.cryptexTemplate {
+            let templateScoped = template.startAccessingSecurityScopedResource()
+            defer { if templateScoped { template.stopAccessingSecurityScopedResource() } }
+            try? FileManager.default.removeItem(at: VMConfig.cryptexTemplate)
+            try FileManager.default.copyItem(at: template, to: VMConfig.cryptexTemplate)
+            note(L("Подготовка: шаблон Cryptex1 на месте"))
         }
 
         // The restore itself reads the archive again from here on — point it

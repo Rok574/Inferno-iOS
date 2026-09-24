@@ -92,6 +92,11 @@ struct VMConfig {
     static var guestConsoleLog: URL { documents.appendingPathComponent("guest-console.log") }
     static var sepROM: URL { documents.appendingPathComponent("AppleSEPROM-Cebu-B1") }
     static var sepROMPresent: Bool { FileManager.default.fileExists(atPath: sepROM.path) }
+    /// Any real device's own Cryptex1 IM4M -- iOS 16+ only, see `Cryptex1`.
+    /// A Mac's own lives under
+    /// `/System/Volumes/Preboot/<UUID>/cryptex1/current/apticket.*.im4m`.
+    static var cryptexTemplate: URL { dataDirectory.appendingPathComponent("cryptex_template.im4m") }
+    static var cryptexTemplatePresent: Bool { FileManager.default.fileExists(atPath: cryptexTemplate.path) }
 
     /// Whether the device disk holds a system at all.
     ///
@@ -101,12 +106,38 @@ struct VMConfig {
     /// the first bytes are worth a look before the machine is let go.
     static var systemInstalled: Bool {
         guard let image = rootImage else { return false }
-        // qcow2 carries its own header, so anything of that shape counts.
-        if image.format == "qcow2" { return true }
+        if image.format == "qcow2" { return qcow2HasAllocatedData(at: image.path) }
         guard let handle = FileHandle(forReadingAtPath: image.path) else { return false }
         defer { try? handle.close() }
         let head = handle.readData(ofLength: 64 * 1024)
         return head.contains { $0 != 0 }
+    }
+
+    /// Whether a qcow2 image has ever had anything written to it.
+    ///
+    /// A blank disk fresh out of `qemu-img create -f qcow2` — which is what the
+    /// kit ships as `root.qcow2`, the same way a restore leaves one blank until
+    /// it actually runs — has no allocated clusters at all: its L1 table (the
+    /// top level of the two-level map from guest offset to host cluster) is
+    /// every entry zero. Once anything is written, at least one L1 entry points
+    /// at an L2 table. That is cheaper to check than trusting the file's mere
+    /// existence, or its format, to mean a restore actually completed.
+    private static func qcow2HasAllocatedData(at path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return true }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 104), header.count >= 48 else { return true }
+        guard header[0..<4].elementsEqual([0x51, 0x46, 0x49, 0xFB]) else { return true }    // "QFI\xFB"
+
+        func be32(_ at: Int) -> UInt32 { header[at..<at + 4].reduce(0) { ($0 << 8) | UInt32($1) } }
+        func be64(_ at: Int) -> UInt64 { header[at..<at + 8].reduce(0) { ($0 << 8) | UInt64($1) } }
+
+        let l1Size   = Int(be32(36))
+        let l1Offset = be64(40)
+        guard l1Size > 0 else { return false }    // no L1 table at all -- nothing was ever mapped
+
+        handle.seek(toFileOffset: l1Offset)
+        guard let l1Table = try? handle.read(upToCount: l1Size * 8) else { return true }
+        return l1Table.contains { $0 != 0 }
     }
 
     /// The device image, either as the raw file from the desktop kit or as a

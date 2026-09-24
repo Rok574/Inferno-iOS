@@ -60,13 +60,19 @@ final class RestoreSession: ObservableObject {
                 ?? Date.distantPast
         }
         if FileManager.default.fileExists(atPath: ours.path),
-           let daemon = RestoreRamdisk.programs?.daemon, stamp(ours) > stamp(daemon) {
+           let daemon = RestoreRamdisk.programs?.daemon,
+           stamp(ours) > stamp(daemon), stamp(ours) > stamp(stock) {
+            // Newer than the stock one too: a kit re-made for another firmware
+            // unpacks a fresh stock ramdisk, and the old copy must not outlive it.
             return ours
         }
         do {
             try RestoreRamdisk.build(stock: stock, into: ours) { LogCapture.shared.note($0) }
             return ours
         } catch {
+            // A build that failed halfway leaves a half-patched copy behind,
+            // and it would pass the check above next time.
+            try? FileManager.default.removeItem(at: ours)
             // Worth saying out loud rather than failing the restore: the stock
             // ramdisk restores perfectly well, and what is lost is the patches
             // afterwards, which a person can still apply from a computer.
@@ -186,6 +192,9 @@ final class RestoreSession: ObservableObject {
                 try self.restore(over: channel, usb: usb, protocolVersion: version)
             } catch {
                 LogCapture.shared.note(L("Рестор: %@", error.localizedDescription))
+                // Whether the guest is still running at all is what tells a
+                // dead link from a hung machine.
+                DispatchQueue.main.async { self.model?.inspectMachine() }
                 self.set(.failed(error.localizedDescription))
             }
         }
@@ -196,12 +205,17 @@ final class RestoreSession: ObservableObject {
     private func restore(over channel: GuestUSB.Channel, usb: GuestUSB,
                          protocolVersion: Int) throws {
         guard let firmware = RestoreSession.firmware else {
-            LogCapture.shared.note(L("Рестор: положите .ipsw рядом с InfernoData, см. RESTORE.md"))
+            // Said on screen too: a bare return left the stage at "ready"
+            // forever, which reads as a restore that never starts.
+            let why = L("Рестор: положите .ipsw рядом с InfernoData, см. RESTORE.md")
+            LogCapture.shared.note(why)
+            set(.failed(why))
             return
         }
         guard let ticket = try? Data(contentsOf: RestoreSession.ticket) else {
-            LogCapture.shared.note(L("Рестор: нет тикета %@, см. RESTORE.md",
-                                     RestoreSession.ticket.lastPathComponent))
+            let why = L("Рестор: нет тикета %@, см. RESTORE.md", RestoreSession.ticket.lastPathComponent)
+            LogCapture.shared.note(why)
+            set(.failed(why))
             return
         }
 
@@ -215,8 +229,10 @@ final class RestoreSession: ObservableObject {
         let identity = try ipsw.buildIdentity()
         LogCapture.shared.note(L("Рестор: прошивка %@", firmware.lastPathComponent))
 
+        let cryptexTemplate = (try? Data(contentsOf: VMConfig.cryptexTemplate)).map { [UInt8]($0) }
         let client = RestoreClient(
             usb: usb, ipsw: ipsw, identity: identity, ticket: [UInt8](ticket),
+            cryptexTemplate: cryptexTemplate,
             note: { LogCapture.shared.note($0) },
             progress: { [weak self] what, done in
                 self?.set(.restoring(what, done))

@@ -13,7 +13,10 @@
 #          the disks, root_ticket.der and the SEP firmware (default ~/inferno-ios/ios16)
 #   ACCEL  hvf (default here: a restore under TCG takes hours) or tcg
 #   MEM    guest memory, 4G by default; the phone gives the guest 2G
+#   SMP    cores, 4 by default -- one of them is the SEP, so that is three
+#          application cores; the real part has six plus the SEP
 #   GUI    sdl to open a window; none by default
+#   BOOTARGS  extra boot arguments, appended to the fixed ones
 set -uo pipefail
 
 MODE="${1:-}"
@@ -99,8 +102,8 @@ rm -f "$QMP"
   -kernel "$D/Restore/$KERNEL" \
   -dtb "$D/Restore/$DTB" \
   ${INITRD[@]+"${INITRD[@]}"} \
-  -append "tlto_us=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 serial=3 wdt=-1 launchd_unsecure_cache=1 -vm_compressor_wk_sw" \
-  -smp 4 -m "${MEM:-4G}" \
+  -append "tlto_us=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 serial=3 wdt=-1 launchd_unsecure_cache=1 -vm_compressor_wk_sw ${BOOTARGS:-}" \
+  -smp "${SMP:-4}" -m "${MEM:-4G}" \
   -chardev "socket,id=serial0,host=127.0.0.1,port=4555,server=on,wait=off,logfile=$GLOG,logappend=off" \
   -serial chardev:serial0 \
   -qmp "unix:$QMP,server,nowait" \

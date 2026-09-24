@@ -15,6 +15,7 @@ struct RestoreKitSetup: View {
     @State private var firmware: URL? = RestoreSession.firmware
     @State private var ticket: URL?
     @State private var rom: URL?
+    @State private var cryptexTemplate: URL?
     @AppStorage("sepKey") private var sepKey = ""
     @State private var preparing = false
     @State private var progress = ""
@@ -46,6 +47,15 @@ struct RestoreKitSetup: View {
                    source: L("securerom.fun"),
                    chosen: rom?.lastPathComponent
                        ?? (VMConfig.sepROMPresent ? L("уже в папке приложения") : nil)) { rom = $0 }
+
+            // Only iOS 16+ ever asks for this; left empty, an iOS 14 restore
+            // never notices, and a 16+ one fails with a clear message instead
+            // of hanging.
+            KitRow(title: L("Шаблон Cryptex1 (только iOS 16+)"),
+                   example: "apticket.im4m",
+                   source: L("любой ваш собственный тикет Cryptex1 — форма и подпись, не содержимое"),
+                   chosen: cryptexTemplate?.lastPathComponent
+                       ?? (VMConfig.cryptexTemplatePresent ? L("уже в папке приложения") : nil)) { cryptexTemplate = $0 }
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
@@ -144,7 +154,8 @@ struct RestoreKitSetup: View {
         #if os(iOS)
         UIApplication.shared.isIdleTimerDisabled = true
         #endif
-        let inputs = RestorePrep.Inputs(ipsw: firmware, shsh2: ticket, sepROM: rom, sepKey: sepKey)
+        let inputs = RestorePrep.Inputs(ipsw: firmware, shsh2: ticket, sepROM: rom, sepKey: sepKey,
+                                        cryptexTemplate: cryptexTemplate)
         DispatchQueue.global(qos: .userInitiated).async {
             var made = false
             do {

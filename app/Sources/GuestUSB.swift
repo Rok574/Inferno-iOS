@@ -398,12 +398,116 @@ final class GuestUSB {
             txSeq &+= 1
         }
         let packet = head + header + payload
-        try transfer(.tokenOut, endpoint: endpointOut, data: packet, retries: 2000, delay: 0.001)
+        do {
+            try bulkOut(packet)
+        } catch {
+            // The number is handed back: the device counts every packet and
+            // drops everything after a gap for good -- "detected duplicate
+            // packet. Expected 1790 received 1791" -- so a packet that never
+            // went out must not take its number with it.
+            if muxVersion >= 2 { txSeq &-= 1 }
+            LogCapture.shared.note(L("USB гостя: пакет не ушёл — %@", error.localizedDescription))
+            throw error
+        }
         // A transfer that ends on a packet boundary needs a zero-length packet,
         // or the device waits for the rest of it.
         if packet.count % maxPacket == 0 {
-            try transfer(.tokenOut, endpoint: endpointOut, data: [], retries: 2000, delay: 0.001)
+            try bulkOut([])
         }
+        if muxVersion >= 2 {
+            recent.append(packet)
+            if recent.count > GuestUSB.recentKept { recent.removeFirst(recent.count - GuestUSB.recentKept) }
+        }
+    }
+
+    /// The last packets sent, whole and under their own numbers, for
+    /// `resendRecent`. Guarded by `sendLock`.
+    private var recent: [[UInt8]] = []
+    /// Far more than the device's window can hold: whichever packet it lost
+    /// is certainly still in here by the time the link is seen to be stuck.
+    private static let recentKept = 96
+
+    /// The last time the device showed it was taking what it was sent: an
+    /// acknowledgement moved, or data arrived. Guarded by `muxLock`.
+    private var lastProgress = Date()
+    private var lastResend = Date.distantPast
+
+    /// Now and then the emulated controller hands the device one mux packet
+    /// mangled, the device drops it, and from then on refuses every packet
+    /// after it for being out of order ("detected duplicate packet. Expected
+    /// 2578 received 2579") -- the link is dead with nothing lost on this
+    /// side. Sending the recent packets again, numbers unchanged, heals it:
+    /// the device takes the one it is waiting for and everything after, and
+    /// drops those it already has for the same reason it dropped the rest.
+    /// Harmless when nothing was lost -- all of them are then repeats.
+    ///
+    /// Quick when `channel` has bytes out that the device has not
+    /// acknowledged -- the plain sign of a lost packet. Slow otherwise: the
+    /// lost one may have been a bare acknowledgement, which leaves nothing
+    /// outstanding here, but a guest busy for a while says nothing either.
+    private func resendIfStuck(_ channel: Channel) throws {
+        muxLock.lock()
+        let patience: TimeInterval = channel.txSeq != channel.txAcked ? 3 : 15
+        let stuck = Date().timeIntervalSince(lastProgress) > patience
+            && Date().timeIntervalSince(lastResend) > patience
+        if stuck { lastResend = Date() }
+        muxLock.unlock()
+        guard stuck else { return }
+
+        sendLock.lock(); defer { sendLock.unlock() }
+        LogCapture.shared.note(L("USB гостя: гость молчит — повторяю последние %d пакетов", recent.count))
+        for packet in recent {
+            try bulkOut(packet)
+            if packet.count % maxPacket == 0 { try bulkOut([]) }
+        }
+    }
+
+    /// How long the device may keep refusing a packet before the link counts
+    /// as dead. Two seconds used to be the limit, and a guest busy writing the
+    /// restore under the translator overran it -- the whole restore died with
+    /// NAK. `writeDeadline` still catches a guest that is truly stuck.
+    private static let bulkOutPatience: TimeInterval = 60
+
+    /// One OUT packet, retried on NAK -- and between tries, whatever the
+    /// device has for us is taken off it.
+    ///
+    /// Retrying while holding the link starved the other direction: the
+    /// device will not take more until what it is sending has been read, the
+    /// pump that would read it was waiting for this very send, and the two
+    /// sat there -- "a packet waited 89.1 s" here, "IO timeout for endpoint
+    /// 81" on the guest. What is read is only filed away in `inbound`: acting
+    /// on it could mean sending an acknowledgement, and that would go out
+    /// ahead of this packet under the next number.
+    private func bulkOut(_ packet: [UInt8]) throws {
+        let started = Date()
+        defer {
+            // Said out loud: a long refusal is what precedes a dead restore,
+            // and whether the guest was merely slow or gone is the question.
+            let took = Date().timeIntervalSince(started)
+            if took > 2 { LogCapture.shared.note(L("USB гостя: пакет ждал приёма %.1f с", took)) }
+        }
+        let deadline = started.addingTimeInterval(GuestUSB.bulkOutPatience)
+        while true {
+            do {
+                try transfer(.tokenOut, endpoint: endpointOut, data: packet, retries: 1, delay: 0)
+                return
+            } catch Failure.notReady {
+                if Date() > deadline { throw Failure.notReady }
+                drainIn()
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
+    }
+
+    /// Takes one IN transfer's worth off the device, if it has any, and files
+    /// it away unread for `readMux` to take apart later.
+    private func drainIn() {
+        recvLock.lock(); defer { recvLock.unlock() }
+        guard let chunk = try? transfer(.tokenIn, endpoint: endpointIn, length: GuestUSB.usbMTU,
+                                        retries: 1, delay: 0),
+              !chunk.isEmpty
+        else { return }
+        inbound += chunk
     }
 
     /// Held across a whole incoming packet, for the same reason as `sendLock`.
@@ -505,6 +609,10 @@ final class GuestUSB {
         try sendTcp(channel, flags: 0x02)                    // SYN
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            // The SYN can be lost like any other packet, and then nothing
+            // ever answers it; left alone, the guest took it late, after the
+            // knock had been given up on, and ASR died on an empty connection.
+            try resendIfStuck(channel)
             try serviceMux(timeout: 0.2)
             muxLock.lock()
             let established = channel.txAck != 0
@@ -566,7 +674,10 @@ final class GuestUSB {
             }
             muxLock.lock()
             channel.peerWindow = Int(u16be(body, 14)) << 8
-            if flags & 0x10 != 0 { channel.txAcked = acknowledged }
+            if flags & 0x10 != 0 {
+                if acknowledged != channel.txAcked { lastProgress = Date() }
+                channel.txAcked = acknowledged
+            }
             muxLock.unlock()
 
             if flags & 0x02 != 0, flags & 0x10 != 0 {         // SYN|ACK
@@ -578,6 +689,7 @@ final class GuestUSB {
                 muxLock.lock()
                 channel.txAck = sequence &+ UInt32(payload.count)
                 channel.inbox += payload
+                lastProgress = Date()
                 muxLock.unlock()
                 try sendTcp(channel, flags: 0x10)
             }
@@ -605,11 +717,19 @@ final class GuestUSB {
             muxLock.unlock()
             if dead { throw Failure.gone }
             guard room > 0 else {
+                try resendIfStuck(channel)
                 try serviceMux(timeout: 0.005)
                 if Date() > writeDeadline(channel) { throw Failure.usb(L("гость не разбирает присланное")) }
                 continue
             }
-            let end = min(at + min(mtu, room), bytes.count)
+            var end = min(at + min(mtu, room), bytes.count)
+            // Never a whole number of USB packets on the wire. Such a transfer
+            // needs a zero-length packet after it, and the emulated controller
+            // mishandles those now and then: the guest then reads a mux packet
+            // short, drops it, and discards everything after the gap for good
+            // ("detected duplicate packet. Expected 749 received 750"). One
+            // byte less makes every data packet end itself.
+            if (end - at + (muxVersion < 2 ? 8 : 16) + 20) % 512 == 0, end - at > 1 { end -= 1 }
             try sendTcp(channel, flags: 0x10, payload: Array(bytes[at..<end]))
             at = end
             waited[channel.localPort] = nil
@@ -643,6 +763,7 @@ final class GuestUSB {
                 return out
             }
             if dead && have == 0 { throw Failure.gone }
+            try resendIfStuck(channel)
             try serviceMux(timeout: 0.2)
         }
         throw Failure.usb(L("гость не ответил вовремя"))
@@ -675,9 +796,20 @@ final class GuestUSB {
     /// Keeps the link serviced while nobody is reading a channel, so the device
     /// sees its acknowledgements and the session stays alive.
     private func pump() {
+        var lastNote = Date.distantPast
         while link >= 0 {
             do { try serviceMux(timeout: 0.2) }
-            catch { break }
+            catch Failure.gone { break }
+            catch {
+                // Anything short of the link closing is survivable, and this
+                // thread quietly ending is not: it is the one that keeps
+                // acknowledging the device while nobody reads a channel.
+                if Date().timeIntervalSince(lastNote) > 5 {
+                    lastNote = Date()
+                    LogCapture.shared.note(error.localizedDescription)
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
     }
 

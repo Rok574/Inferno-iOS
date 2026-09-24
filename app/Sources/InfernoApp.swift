@@ -121,6 +121,13 @@ final class VMModel: ObservableObject {
 
     var config: VMConfig { configOverride ?? Settings.shared.config }
 
+    /// The machine is up on the restore ramdisk. Nothing may type into its
+    /// console then: the shell, the agent, the status bar and the time zone
+    /// all begin by clearing the line with Ctrl-C, and on the ramdisk that
+    /// SIGINT lands on the restore itself -- ASR went quiet two seconds later
+    /// and the transfer died with NAK.
+    var isRestoring: Bool { config.restoreRamdiskPath != nil }
+
     /// Chosen when the machine starts and kept for its lifetime: the built-in
     /// path needs the emulator library to be loaded before it can exist at all.
     private var display: GuestDisplay?
@@ -230,6 +237,8 @@ final class VMModel: ObservableObject {
                     }
                     self.serial.follow()
                     self.serial.attachInput(port: self.config.serialPort)
+                    // Not on the restore ramdisk: see `isRestoring`.
+                    guard !self.isRestoring else { return }
                     // The shell is opened without waiting for anyone to look at
                     // its pane. It waits for the bootstrap's bash by itself, and
                     // having it from the start is what keeps the rest working:
@@ -311,6 +320,7 @@ final class VMModel: ObservableObject {
     /// saying so from inside, which is what the stock guide has always told
     /// people to do by hand.
     func fixNetwork() {
+        guard !isRestoring else { return }
         // Through the agent when there is one: it reaches the guest off the
         // console, so this works even while the console is busy — which is when
         // the network most often needs a nudge.
@@ -494,6 +504,7 @@ final class VMModel: ObservableObject {
     /// hands it the status bar so the console is out of that loop. Safe to call
     /// again — it does nothing while a bring-up is in flight or already done.
     func bringUpAgent(force: Bool = false) {
+        guard !isRestoring else { return }
         guard isRunning else { return }
         if force { agentBringUpStarted = false; guestAgent = nil; agentAttempts = 0 }
         guard !agentBringUpStarted, guestAgent == nil else { return }
@@ -539,6 +550,7 @@ final class VMModel: ObservableObject {
     /// Coalesced for a second: a text field or a stepper changes many times in
     /// a row, and every change would otherwise be a console conversation.
     func paintStatusBar(force: Bool = false) {
+        guard !isRestoring else { return }
         guard isRunning else { return }
         if force { paintedStatusBar = nil }
         guard !paintQueued else { return }
@@ -613,6 +625,7 @@ final class VMModel: ObservableObject {
     /// SpringBoard restarts on its own. Each time only if the console is free:
     /// nothing waits for this.
     private func paintStatusBarWhenReady(delay: TimeInterval) {
+        guard !isRestoring else { return }
         statusBarRounds += 1
         let round = statusBarRounds
         let pauses: [TimeInterval] = [delay, 30, 30, 30, 30]
@@ -634,6 +647,7 @@ final class VMModel: ObservableObject {
     /// One repaint that gives way to anybody else on the console and says
     /// nothing unless it fails.
     private func repaintStatusBarQuietly() {
+        guard !isRestoring else { return }
         // With the agent up there is nothing to do here: it reapplies the
         // override on its own, including after a respring, without the console.
         if guestAgent != nil { return }
@@ -673,6 +687,7 @@ final class VMModel: ObservableObject {
     /// otherwise over the console only when nobody else is using it; quiet
     /// unless the zone changes or the guest says something unexpected.
     func syncTimeZone(force: Bool = false) {
+        guard !isRestoring else { return }
         guard isRunning, Settings.shared.guestTimeZone, let zone = GuestTimeZone.phone else { return }
         if force { guestTimeZone = nil }
         guard zone != guestTimeZone, !timeZoneInFlight else { return }
@@ -757,6 +772,7 @@ final class VMModel: ObservableObject {
     /// says nothing about why. Only the quick half runs here; the slow half is
     /// needed once per image and stays on the button.
     private func preparePackages(delay: TimeInterval = 45) {
+        guard !isRestoring else { return }
         let serial = self.serial
         var attempts = 0
 

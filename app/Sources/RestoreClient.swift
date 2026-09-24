@@ -32,6 +32,9 @@ final class RestoreClient {
     private let ipsw: IPSW
     private let identity: [String: Any]
     private let ticket: [UInt8]
+    /// A real device's own Cryptex1 IM4M, for `Cryptex1.forge` to build this
+    /// build's ticket out of -- only iOS 16+ ever asks for one.
+    private let cryptexTemplate: [UInt8]?
     private let note: (String) -> Void
     private let reportProgress: (String, Double) -> Void
     /// The last time progress was passed on, so that a transfer running at ten
@@ -39,12 +42,14 @@ final class RestoreClient {
     private var lastProgress = Date.distantPast
 
     init(usb: GuestUSB, ipsw: IPSW, identity: [String: Any], ticket: [UInt8],
+         cryptexTemplate: [UInt8]? = nil,
          note: @escaping (String) -> Void,
          progress: @escaping (String, Double) -> Void = { _, _ in }) {
         self.usb = usb
         self.ipsw = ipsw
         self.identity = identity
         self.ticket = ticket
+        self.cryptexTemplate = cryptexTemplate
         self.note = note
         self.reportProgress = progress
     }
@@ -199,9 +204,9 @@ final class RestoreClient {
                       to: request, over: restored)
 
         // What iTunes sends is an empty dictionary, and that is enough to make
-        // the device carry on with FDR. The updater's preflight takes the same
-        // nothing for an answer.
-        case "FDRTrustData", "FirmwareUpdaterPreflight":
+        // the device carry on with FDR. Both preflights (`idevicerestore`
+        // answers them with the exact same function) take the same nothing.
+        case "FDRTrustData", "FirmwareUpdaterPreflight", "DeviceRestoreInfoPreflight":
             try reply([:], to: request, over: restored)
 
         // A family of requests that all mean the same thing: look through the
@@ -227,11 +232,22 @@ final class RestoreClient {
         case "SourceBootObjectV4", "SourceBootObjectV5":
             try sendBootObject(request, over: restored, personalize: false)
 
-        // These want a firmware signed by Apple for a coprocessor the emulated
-        // phone does not have. Nothing offline can answer them.
-        case "FirmwareUpdaterData", "DeviceRestoreInfoPreflight":
+        case "FirmwareUpdaterData":
             let updater = arguments["MessageArgUpdaterName"] as? String ?? "?"
-            throw Failure.unsupported(L("прошивка сопроцессора %@ — её подписывает Apple", updater))
+            // iOS 16's own OS and app cryptexes -- everything else here is a
+            // firmware for a coprocessor the emulated phone does not have,
+            // and Apple is the only one who can sign those.
+            guard updater == "Cryptex1" || updater == "Cryptex1LocalPolicy" else {
+                throw Failure.unsupported(L("прошивка сопроцессора %@ — её подписывает Apple", updater))
+            }
+            guard let cryptexTemplate else {
+                throw Failure.unsupported(L("нет шаблона Cryptex1 — см. RESTORE.md"))
+            }
+            let responseKey = ((arguments["DeviceGeneratedTags"] as? [String: Any])?["ResponseTags"] as? [Any])?
+                .first as? String ?? "Cryptex1,Ticket"
+            let im4m = try Cryptex1.forge(identity: identity, template: cryptexTemplate)
+            note(L("Рестор: подписан тикет Cryptex1, %d байт", im4m.count))
+            try reply(["FirmwareResponseData": [responseKey: Data(im4m)]], to: request, over: restored)
 
         default:
             throw Failure.unsupported(type)
@@ -501,7 +517,9 @@ final class RestoreClient {
         var lastFailure: Error?
         for attempt in 1...30 {
             do {
-                return try usb.connect(to: port, timeout: 10)
+                // Long enough for a lost SYN to be sent again (see
+                // `GuestUSB.resendIfStuck`) before this knock is given up on.
+                return try usb.connect(to: port, timeout: 20)
             } catch {
                 lastFailure = error
                 if attempt == 1 || attempt % 5 == 0 {

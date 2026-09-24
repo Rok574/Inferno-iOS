@@ -193,7 +193,12 @@ enum DER {
         return Node(identifier: [0x02], value: bytes)
     }
 
-    /// A node under one of Apple's private four-character tags.
+    /// A node under one of Apple's private four-character tags -- explicit
+    /// tagging, the way every field in a ticket is actually built: the tag
+    /// wraps exactly one child, a plain SEQUENCE, and that SEQUENCE is what
+    /// holds `children` (typically the name and the value). Confirmed against
+    /// a real Cryptex1 IM4M byte for byte -- every `MANP`, `CHIP`, `caos`,
+    /// `DGST`, ... field nests this way, one SEQUENCE deep under its tag.
     static func tagged(_ name: String, _ children: [Node]) -> Node {
         var number: UInt64 = 0
         for byte in Array(name.utf8) { number = (number << 8) | UInt64(byte) }
@@ -206,7 +211,7 @@ enum DER {
         } while left > 0
         for index in 0..<seven.count where index < seven.count - 1 { seven[index] |= 0x80 }
         identifier += seven
-        return Node(identifier: identifier, children: children)
+        return Node(identifier: identifier, children: [sequence(children)])
     }
 }
 

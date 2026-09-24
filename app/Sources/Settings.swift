@@ -828,6 +828,22 @@ private struct RestoreSettings: View {
     @AppStorage("restoreSource") private var sourceRaw = Source.scratch.rawValue
     private var source: Source { Source(rawValue: sourceRaw) ?? .scratch }
 
+    /// Which major version the firmware picked above is. Not read from the
+    /// firmware itself -- said up front, so the screen can grey out "Начать
+    /// рестор" before anyone spends time picking files for a version that
+    /// still needs one more thing in place.
+    ///
+    /// iOS 16 and later ask for a Cryptex1 ticket partway through, which
+    /// `Cryptex1.forge` answers -- but only once a real device's own Cryptex1
+    /// IM4M is sitting in `VMConfig.cryptexTemplate` for it to build the
+    /// answer out of. iOS 14 never asks, so it needs nothing here.
+    private enum FirmwareVersion: String { case ios14, ios16 }
+    @AppStorage("restoreFirmwareVersion") private var firmwareVersionRaw = FirmwareVersion.ios14.rawValue
+    private var firmwareVersion: FirmwareVersion { FirmwareVersion(rawValue: firmwareVersionRaw) ?? .ios14 }
+    private var restoreSupported: Bool {
+        firmwareVersion == .ios14 || VMConfig.cryptexTemplatePresent
+    }
+
     @State private var picking = false
     /// Held in state, not read fresh: a computed property changing behind the
     /// view's back does not redraw it.
@@ -848,6 +864,20 @@ private struct RestoreSettings: View {
 
     var body: some View {
         SettingsRoot {
+            Section {
+                Picker(L("Версия"), selection: $firmwareVersionRaw) {
+                    Text(L("iOS 14")).tag(FirmwareVersion.ios14.rawValue)
+                    Text(L("iOS 16")).tag(FirmwareVersion.ios16.rawValue)
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(firmwareVersion == .ios14
+                     ? L("iOS 14 не спрашивает тикет Cryptex1 — рестор без компьютера идёт до конца.")
+                     : (VMConfig.cryptexTemplatePresent
+                        ? L("Шаблон Cryptex1 на месте — рестор подпишет тикет сам, когда гость его попросит.")
+                        : L("iOS 16+ на середине рестора просит подписать тикет Cryptex1. Положите в набор шаблон (любой ваш собственный тикет Cryptex1) — ниже, во вкладке «С нуля», или файлом cryptex_template.im4m в готовой папке. Пока его нет, «Начать рестор» недоступен для этой версии.")))
+            }
+
             Section {
                 Picker(L("Откуда"), selection: $sourceRaw) {
                     Text(L("С нуля")).tag(Source.scratch.rawValue)
