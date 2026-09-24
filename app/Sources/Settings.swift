@@ -915,8 +915,12 @@ private struct RestoreSettings: View {
                 if let ramdisk = RestoreSession.ramdisk {
                     LabeledContent(L("RAM-диск"), value: ramdisk.lastPathComponent)
                 }
+                // Off for 0.3.1: the emulated USB controller still loses
+                // packets and the guest panics now and then partway through,
+                // so a restore from the phone does not finish reliably yet.
                 Button(L("Начать рестор")) { session.start(model: model) }
-                    .disabled(session.stage.isBusy || model.isRunning || RestoreSession.ramdisk == nil)
+                    .disabled(true || !restoreSupported || session.stage.isBusy || model.isRunning
+                              || RestoreSession.ramdisk == nil)
                 Button(L("Остановить"), role: .destructive) { session.stop() }
                     .disabled(!session.stage.isBusy)
             } footer: {
