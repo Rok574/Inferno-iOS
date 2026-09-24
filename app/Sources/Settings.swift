@@ -291,9 +291,12 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    // Off for 0.3.1, the whole page: see the note on "Начать
+                    // рестор" in `RestoreSettings`.
                     NavigationLink { RestoreSettings(model: model) } label: {
                         Label(L("Восстановление"), systemImage: "arrow.clockwise.circle")
                     }
+                    .disabled(true)
                     NavigationLink { DiagnosticsSettings(model: model) } label: {
                         Label(L("Диагностика"), systemImage: "stethoscope")
                     }
@@ -357,6 +360,8 @@ struct MacSettingsView: View {
                     row(.machine, L("Машина"), "cpu")
                     row(.translator, L("Транслятор"), "arrow.triangle.2.circlepath")
                     row(.restore, L("Восстановление"), "arrow.clockwise.circle")
+                        .disabled(true)
+                        .selectionDisabled(true)
                     row(.diagnostics, L("Диагностика"), "stethoscope")
                 }
                 Section {
