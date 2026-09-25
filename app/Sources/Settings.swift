@@ -1,4 +1,4 @@
-import Foundation
+
 import SwiftUI
 
 /// Everything the user can change without a rebuild.
@@ -296,7 +296,6 @@ struct SettingsView: View {
                     NavigationLink { RestoreSettings(model: model) } label: {
                         Label(L("Восстановление"), systemImage: "arrow.clockwise.circle")
                     }
-                    .disabled(true)
                     NavigationLink { DiagnosticsSettings(model: model) } label: {
                         Label(L("Диагностика"), systemImage: "stethoscope")
                     }
@@ -360,8 +359,6 @@ struct MacSettingsView: View {
                     row(.machine, L("Машина"), "cpu")
                     row(.translator, L("Транслятор"), "arrow.triangle.2.circlepath")
                     row(.restore, L("Восстановление"), "arrow.clockwise.circle")
-                        .disabled(true)
-                        .selectionDisabled(true)
                     row(.diagnostics, L("Диагностика"), "stethoscope")
                 }
                 Section {
@@ -924,7 +921,7 @@ private struct RestoreSettings: View {
                 // packets and the guest panics now and then partway through,
                 // so a restore from the phone does not finish reliably yet.
                 Button(L("Начать рестор")) { session.start(model: model) }
-                    .disabled(true || !restoreSupported || session.stage.isBusy || model.isRunning
+                    .disabled(!restoreSupported || session.stage.isBusy || model.isRunning
                               || RestoreSession.ramdisk == nil)
                 Button(L("Остановить"), role: .destructive) { session.stop() }
                     .disabled(!session.stage.isBusy)
